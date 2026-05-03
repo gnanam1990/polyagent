@@ -10,3 +10,7 @@ __pycache__/
 .DS_Store
 *.db
 *.db-journal
+polyagent.db
+polyagent.db-journal
+polyagent.db-wal
+polyagent.db-shm
