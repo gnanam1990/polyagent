@@ -11,10 +11,12 @@ services:
       POLYAGENT_DB_PATH: /data/polyagent.db
     volumes:
       - polyagent-data:/data
-      # Mount the host's kpass binary into the container so passport.py
-      # can shell out to it. Comment this out if you don't have kpass
-      # installed locally — only /health will work.
-      - /usr/local/bin/kpass:/usr/local/bin/kpass:ro
+      # To enable auth-gated endpoints, uncomment the two mounts below
+      # and set KPASS_BIN + KPASS_CONFIG_DIR (defaults work if you have
+      # the standard kpass install). /health works without these.
+      #
+      # - ${KPASS_BIN:-${HOME}/.local/bin/kpass}:/usr/local/bin/kpass:ro
+      # - ${KPASS_CONFIG_DIR:-${HOME}/.kite-passport}:/home/polyagent/.kite-passport:ro
 
 volumes:
   polyagent-data:
