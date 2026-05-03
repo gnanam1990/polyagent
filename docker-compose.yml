@@ -1,0 +1,20 @@
+services:
+  polyagent:
+    build: .
+    image: polyagent:latest
+    container_name: polyagent
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      POLYAGENT_LOG_LEVEL: INFO
+      POLYAGENT_DB_PATH: /data/polyagent.db
+    volumes:
+      - polyagent-data:/data
+      # Mount the host's kpass binary into the container so passport.py
+      # can shell out to it. Comment this out if you don't have kpass
+      # installed locally — only /health will work.
+      - /usr/local/bin/kpass:/usr/local/bin/kpass:ro
+
+volumes:
+  polyagent-data:
