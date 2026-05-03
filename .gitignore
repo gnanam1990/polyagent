@@ -1,0 +1,12 @@
+.venv/
+.kpass/
+.kite-passport/
+.cursor/
+.cline/
+.agents/
+.claude/
+__pycache__/
+*.pyc
+.DS_Store
+*.db
+*.db-journal
