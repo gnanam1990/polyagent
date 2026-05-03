@@ -6,8 +6,7 @@ how to talk to the backend. We shell out to kpass and parse its JSON output.
 
 import asyncio
 import json
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
@@ -32,7 +31,7 @@ class SessionInfo(BaseModel):
         # kpass returns RFC3339 with trailing Z — parse explicitly
         try:
             exp = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
-            return datetime.now(timezone.utc) < exp
+            return datetime.now(UTC) < exp
         except ValueError:
             return False
 
@@ -50,7 +49,7 @@ class PassportClient:
     def __init__(self, kpass_path: str = "kpass"):
         self.kpass_path = kpass_path
 
-    async def get_session(self, session_id: str) -> Optional[SessionInfo]:
+    async def get_session(self, session_id: str) -> SessionInfo | None:
         """Look up a session by ID. Returns None if not found or invalid."""
         proc = await asyncio.create_subprocess_exec(
             self.kpass_path,

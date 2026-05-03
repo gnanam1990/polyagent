@@ -1,18 +1,22 @@
 """PolyAgent - Kite-native Polymarket copy-trading service."""
 
 import asyncio
+import logging
 import re
+import sqlite3
 from contextlib import asynccontextmanager
-from typing import Annotated, Optional
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, field_validator
 
 from polyagent.db import get_db, init_db
+from polyagent.logging_setup import RequestIdMiddleware, configure_logging
 from polyagent.passport import PassportClient, SessionInfo
-from polyagent.polygon import PolygonClient, Fill
+from polyagent.polygon import Fill, PolygonClient
 from polyagent.polymarket import PolymarketClient
 
+log = logging.getLogger("polyagent")
 
 passport: PassportClient | None = None
 polygon: PolygonClient | None = None
@@ -22,22 +26,26 @@ polymarket: PolymarketClient | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global passport, polygon, polymarket
+    configure_logging()
     passport = PassportClient()
     polygon = PolygonClient()
     polymarket = PolymarketClient()
     await init_db()
+    log.info("polyagent startup complete")
     yield
     await passport.close()
     await polygon.close()
     await polymarket.close()
+    log.info("polyagent shutdown complete")
 
 
 app = FastAPI(
     title="PolyAgent",
     description="Polymarket copy-trading agent on Kite",
-    version="0.0.5",
+    version="0.0.6",
     lifespan=lifespan,
 )
+app.add_middleware(RequestIdMiddleware)
 
 
 # --- Auth ---
@@ -114,13 +122,13 @@ class Signal(BaseModel):
     fill_price: float
 
     # Enriched (None if market not found in gamma-api)
-    market_question: Optional[str] = None
-    market_condition_id: Optional[str] = None
-    outcome: Optional[str] = None
-    current_market_price: Optional[float] = None
-    market_volume: Optional[float] = None
-    market_end_date: Optional[str] = None
-    market_slug: Optional[str] = None
+    market_question: str | None = None
+    market_condition_id: str | None = None
+    outcome: str | None = None
+    current_market_price: float | None = None
+    market_volume: float | None = None
+    market_end_date: str | None = None
+    market_slug: str | None = None
 
 
 class SignalsResponse(BaseModel):
@@ -136,7 +144,7 @@ class SignalsResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    return HealthResponse(status="ok", service="polyagent", version="0.0.5")
+    return HealthResponse(status="ok", service="polyagent", version="0.0.6")
 
 
 @app.post("/subscribe", response_model=SubscribeResponse)
@@ -153,9 +161,9 @@ async def subscribe(
             )
             await db.commit()
             sub_id = cursor.lastrowid
-        except Exception as e:
+        except sqlite3.IntegrityError as e:
             if "UNIQUE" in str(e):
-                raise HTTPException(409, f"Already subscribed to {req.target_wallet}")
+                raise HTTPException(409, f"Already subscribed to {req.target_wallet}") from e
             raise
 
         row = await (await db.execute(

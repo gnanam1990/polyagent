@@ -7,11 +7,24 @@ This endpoint is publicly accessible from India without VPN.
 The data-api/trades endpoint is geoblocked, but gamma-api/markets is not.
 """
 
-import httpx
-from typing import Optional
+import json
+from typing import Any
 
+import httpx
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
+
+
+def _parse_json_field(value: Any, default: Any) -> Any:
+    """gamma-api returns several fields as JSON-encoded strings inside JSON.
+    Accept the raw value if already decoded, else json.loads it.
+    """
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return default
+    return value if value is not None else default
 
 
 class PolymarketClient:
@@ -25,7 +38,7 @@ class PolymarketClient:
     async def close(self):
         await self._client.aclose()
 
-    async def get_market_by_token(self, token_id: str) -> Optional[dict]:
+    async def get_market_by_token(self, token_id: str) -> dict | None:
         """Look up market metadata by CTF token_id.
 
         Returns dict with: question, condition_id, outcome (YES/NO),
@@ -50,51 +63,23 @@ class PolymarketClient:
 
         m = markets[0]
 
-        # Determine which outcome our token_id corresponds to
-        clob_ids_raw = m.get("clobTokenIds", "[]")
-        if isinstance(clob_ids_raw, str):
-            import json
+        clob_ids = _parse_json_field(m.get("clobTokenIds"), [])
+        outcomes = _parse_json_field(m.get("outcomes"), ["Yes", "No"])
+        prices = _parse_json_field(m.get("outcomePrices"), [])
+
+        token_idx = next(
+            (i for i, tid in enumerate(clob_ids) if str(tid) == str(token_id)),
+            None,
+        )
+
+        outcome = outcomes[token_idx] if token_idx is not None and token_idx < len(outcomes) else "Unknown"
+
+        current_price: float | None = None
+        if token_idx is not None and token_idx < len(prices):
             try:
-                clob_ids = json.loads(clob_ids_raw)
-            except json.JSONDecodeError:
-                clob_ids = []
-        else:
-            clob_ids = clob_ids_raw
-
-        outcomes_raw = m.get("outcomes", '["Yes", "No"]')
-        if isinstance(outcomes_raw, str):
-            import json
-            try:
-                outcomes = json.loads(outcomes_raw)
-            except json.JSONDecodeError:
-                outcomes = ["Yes", "No"]
-        else:
-            outcomes = outcomes_raw
-
-        outcome = "Unknown"
-        for i, tid in enumerate(clob_ids):
-            if str(tid) == str(token_id) and i < len(outcomes):
-                outcome = outcomes[i]
-                break
-
-        prices_raw = m.get("outcomePrices", "[]")
-        if isinstance(prices_raw, str):
-            import json
-            try:
-                prices = json.loads(prices_raw)
-            except json.JSONDecodeError:
-                prices = []
-        else:
-            prices = prices_raw
-
-        current_price = None
-        for i, tid in enumerate(clob_ids):
-            if str(tid) == str(token_id) and i < len(prices):
-                try:
-                    current_price = float(prices[i])
-                except (TypeError, ValueError):
-                    pass
-                break
+                current_price = float(prices[token_idx])
+            except (TypeError, ValueError):
+                current_price = None
 
         info = {
             "question":       m.get("question", "(unknown)"),

@@ -1,11 +1,20 @@
 """SQLite database — async, single-file, WAL mode for concurrent reads."""
 
-import aiosqlite
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import aiosqlite
 
-DB_PATH = Path(__file__).parent.parent / "polyagent.db"
+
+def _resolve_db_path() -> Path:
+    override = os.environ.get("POLYAGENT_DB_PATH")
+    if override:
+        return Path(override)
+    return Path(__file__).parent.parent / "polyagent.db"
+
+
+DB_PATH = _resolve_db_path()
 
 
 SCHEMA = """
@@ -24,9 +33,9 @@ CREATE INDEX IF NOT EXISTS idx_sub_target  ON subscriptions(target_wallet);
 """
 
 
-async def init_db():
+async def init_db() -> None:
     """Create tables if they don't exist. Idempotent."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(_resolve_db_path()) as db:
         await db.executescript(SCHEMA)
         await db.execute("PRAGMA journal_mode=WAL")
         await db.commit()
@@ -35,6 +44,6 @@ async def init_db():
 @asynccontextmanager
 async def get_db():
     """Async context manager for a database connection."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(_resolve_db_path()) as db:
         db.row_factory = aiosqlite.Row
         yield db

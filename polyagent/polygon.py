@@ -22,11 +22,9 @@ Side semantics (from the maker's perspective):
 
 import asyncio
 from dataclasses import dataclass
-from typing import Optional
 
 import httpx
 from eth_utils import keccak
-
 
 # Polymarket V2 exchange contracts on Polygon (deployed March 2026)
 CTF_EXCHANGE     = "0xE111180000d2663C0091e4f400237545B87B996B"
@@ -203,7 +201,7 @@ class PolygonClient:
         address: str,
         from_block: int,
         to_block: int,
-        topics: list[Optional[str]],
+        topics: list[str | None],
         exchange: str,
     ) -> list[Fill]:
         params = [{
