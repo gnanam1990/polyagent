@@ -1,32 +1,41 @@
 """PolyAgent - Kite-native Polymarket copy-trading service."""
 
+import asyncio
 import re
 from contextlib import asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from polyagent.db import get_db, init_db
 from polyagent.passport import PassportClient, SessionInfo
+from polyagent.polygon import PolygonClient, Fill
+from polyagent.polymarket import PolymarketClient
 
 
 passport: PassportClient | None = None
+polygon: PolygonClient | None = None
+polymarket: PolymarketClient | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global passport
+    global passport, polygon, polymarket
     passport = PassportClient()
+    polygon = PolygonClient()
+    polymarket = PolymarketClient()
     await init_db()
     yield
     await passport.close()
+    await polygon.close()
+    await polymarket.close()
 
 
 app = FastAPI(
     title="PolyAgent",
     description="Polymarket copy-trading agent on Kite",
-    version="0.0.3",
+    version="0.0.5",
     lifespan=lifespan,
 )
 
@@ -54,7 +63,7 @@ ETH_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
 class SubscribeRequest(BaseModel):
-    target_wallet: str = Field(description="Polygon address of the whale to copy")
+    target_wallet: str
 
     @field_validator("target_wallet")
     @classmethod
@@ -90,15 +99,35 @@ class HealthResponse(BaseModel):
     version: str
 
 
-class SignalResponse(BaseModel):
+class Signal(BaseModel):
+    """An on-chain Polymarket fill, enriched with market context."""
+    # On-chain
+    block_number: int
+    tx_hash: str
     target_wallet: str
-    market_id: str
-    market_question: str
-    side: str
-    size_usdc: float
-    price: float
-    confidence: float
-    reasoning: str
+    role: str                       # "maker" | "taker"
+    side: str                       # "BUY" | "SELL"
+    exchange: str                   # "ctf" | "negrisk"
+    token_id: str
+    usdc_amount: float
+    token_amount: float
+    fill_price: float
+
+    # Enriched (None if market not found in gamma-api)
+    market_question: Optional[str] = None
+    market_condition_id: Optional[str] = None
+    outcome: Optional[str] = None
+    current_market_price: Optional[float] = None
+    market_volume: Optional[float] = None
+    market_end_date: Optional[str] = None
+    market_slug: Optional[str] = None
+
+
+class SignalsResponse(BaseModel):
+    target_wallet: str
+    lookback_blocks: int
+    fill_count: int
+    signals: list[Signal]
     subscriber_session: str
     remaining_budget_usdc: float
 
@@ -107,7 +136,7 @@ class SignalResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 async def health():
-    return HealthResponse(status="ok", service="polyagent", version="0.0.3")
+    return HealthResponse(status="ok", service="polyagent", version="0.0.5")
 
 
 @app.post("/subscribe", response_model=SubscribeResponse)
@@ -115,7 +144,6 @@ async def subscribe(
     req: SubscribeRequest,
     session: Annotated[SessionInfo, Depends(require_active_session)],
 ):
-    """Add a target whale wallet to copy-track for this session."""
     async with get_db() as db:
         try:
             cursor = await db.execute(
@@ -126,12 +154,8 @@ async def subscribe(
             await db.commit()
             sub_id = cursor.lastrowid
         except Exception as e:
-            # UNIQUE constraint — already subscribed
             if "UNIQUE" in str(e):
-                raise HTTPException(
-                    409,
-                    f"Already subscribed to {req.target_wallet}",
-                )
+                raise HTTPException(409, f"Already subscribed to {req.target_wallet}")
             raise
 
         row = await (await db.execute(
@@ -155,7 +179,6 @@ async def subscribe(
 async def list_subscriptions(
     session: Annotated[SessionInfo, Depends(require_active_session)],
 ):
-    """List all active subscriptions for this session."""
     async with get_db() as db:
         rows = await (await db.execute(
             "SELECT * FROM subscriptions WHERE session_id = ? AND active = 1 "
@@ -186,7 +209,6 @@ async def unsubscribe(
     sub_id: int,
     session: Annotated[SessionInfo, Depends(require_active_session)],
 ):
-    """Soft-delete a subscription. Caller must own the session."""
     async with get_db() as db:
         cursor = await db.execute(
             "UPDATE subscriptions SET active = 0 "
@@ -200,19 +222,77 @@ async def unsubscribe(
     return {"status": "unsubscribed", "id": sub_id}
 
 
-@app.get("/signal/sample", response_model=SignalResponse)
-async def sample_signal(
+async def _is_subscribed(session_id: str, wallet: str) -> bool:
+    async with get_db() as db:
+        row = await (await db.execute(
+            "SELECT 1 FROM subscriptions "
+            "WHERE session_id = ? AND target_wallet = ? AND active = 1",
+            (session_id, wallet.lower()),
+        )).fetchone()
+    return row is not None
+
+
+def _fill_role(fill: Fill, wallet: str) -> str:
+    return "maker" if fill.maker.lower() == wallet.lower() else "taker"
+
+
+async def _enrich(fill: Fill, wallet: str) -> Signal:
+    info = await polymarket.get_market_by_token(str(fill.token_id))
+    return Signal(
+        block_number=fill.block_number,
+        tx_hash=fill.tx_hash,
+        target_wallet=wallet.lower(),
+        role=_fill_role(fill, wallet),
+        side=fill.side_label,
+        exchange=fill.exchange,
+        token_id=str(fill.token_id),
+        usdc_amount=fill.usdc_amount,
+        token_amount=fill.token_amount,
+        fill_price=fill.price,
+        market_question=info["question"] if info else None,
+        market_condition_id=info["condition_id"] if info else None,
+        outcome=info["outcome"] if info else None,
+        current_market_price=info["current_price"] if info else None,
+        market_volume=info["volume"] if info else None,
+        market_end_date=info["end_date"] if info else None,
+        market_slug=info["slug"] if info else None,
+    )
+
+
+@app.get("/signals/recent", response_model=SignalsResponse)
+async def signals_recent(
     session: Annotated[SessionInfo, Depends(require_active_session)],
+    wallet: str = Query(..., description="Target whale wallet to query fills for"),
+    limit: int = Query(10, ge=1, le=50),
+    lookback_blocks: int = Query(10000, ge=100, le=100000),
 ):
-    return SignalResponse(
-        target_wallet="0xPLACEHOLDER",
-        market_id="0xPLACEHOLDER",
-        market_question="Will BTC close above 100k on Dec 31?",
-        side="YES",
-        size_usdc=50.0,
-        price=0.62,
-        confidence=0.78,
-        reasoning="Tracked whale opened position at 0.62",
+    """Fetch recent on-chain fills for a tracked whale, enriched with market context.
+
+    Caller must have an active subscription to `wallet` for this session.
+    """
+    if not ETH_ADDR_RE.match(wallet):
+        raise HTTPException(422, "wallet must be a 0x-prefixed 40-char hex address")
+
+    wallet = wallet.lower()
+
+    if not await _is_subscribed(session.session_id, wallet):
+        raise HTTPException(
+            403,
+            f"Not subscribed to {wallet}. POST /subscribe first.",
+        )
+
+    fills = await polygon.get_fills_for_wallet(
+        wallet, lookback_blocks=lookback_blocks
+    )
+    fills = fills[:limit]
+
+    signals = await asyncio.gather(*[_enrich(f, wallet) for f in fills])
+
+    return SignalsResponse(
+        target_wallet=wallet,
+        lookback_blocks=lookback_blocks,
+        fill_count=len(signals),
+        signals=signals,
         subscriber_session=session.session_id,
         remaining_budget_usdc=session.remaining_budget,
     )
